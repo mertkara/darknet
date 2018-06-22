@@ -87,7 +87,7 @@ void *detect_in_thread(void *ptr)
     layer l = net.layers[net.n-1];
     float *X = det_s.data;
     float *prediction = network_predict(net, X);
-
+	printf("Prediction: %f", prediction);
     memcpy(predictions[demo_index], prediction, l.outputs*sizeof(float));
     mean_arrays(predictions, FRAMES, l.outputs, avg);
     l.output = avg;
@@ -343,6 +343,228 @@ void demo(char *cfgfile, char *weightfile, float thresh, float hier_thresh, int 
 
 	free_network(net);
 }
+
+
+void trackDemo(char *cfgfile, char *weightfile, float thresh, float hier_thresh, int cam_index, const char *filename, char **names, int classes,
+	int frame_skip, char *prefix, char *out_filename, int http_stream_port, int dont_show, int ext_output)
+{
+	//skip = frame_skip;
+	image **alphabet = load_alphabet();
+	int delay = frame_skip;
+	demo_names = names;
+	demo_alphabet = alphabet;
+	demo_classes = classes;
+	demo_thresh = thresh;
+	demo_ext_output = ext_output;
+	printf("Track Demo\n");
+	net = parse_network_cfg_custom(cfgfile, 1);	// set batch=1
+	if (weightfile) {
+		load_weights(&net, weightfile);
+	}
+	//set_batch_network(&net, 1);
+	fuse_conv_batchnorm(net);
+	srand(2222222);
+
+	if (filename) {
+		printf("video file: %s\n", filename);
+		//#ifdef CV_VERSION_EPOCH	// OpenCV 2.x
+		//		cap = cvCaptureFromFile(filename);
+		//#else					// OpenCV 3.x
+		cpp_video_capture = 1;
+		cap = get_capture_video_stream(filename);
+		//#endif
+	}
+	else {
+		printf("Webcam index: %d\n", cam_index);
+		//#ifdef CV_VERSION_EPOCH	// OpenCV 2.x
+		//        cap = cvCaptureFromCAM(cam_index);
+		//#else					// OpenCV 3.x
+		cpp_video_capture = 1;
+		cap = get_capture_webcam(cam_index);
+		//#endif
+	}
+
+	if (!cap) {
+#ifdef WIN32
+		printf("Check that you have copied file opencv_ffmpeg340_64.dll to the same directory where is darknet.exe \n");
+#endif
+		error("Couldn't connect to webcam.\n");
+	}
+
+	layer l = net.layers[net.n - 1];
+	int j;
+
+	avg = (float *)calloc(l.outputs, sizeof(float));
+	for (j = 0; j < FRAMES; ++j) predictions[j] = (float *)calloc(l.outputs, sizeof(float));
+	for (j = 0; j < FRAMES; ++j) images[j] = make_image(1, 1, 3);
+
+	boxes = (box *)calloc(l.w*l.h*l.n, sizeof(box));
+	probs = (float **)calloc(l.w*l.h*l.n, sizeof(float *));
+	for (j = 0; j < l.w*l.h*l.n; ++j) probs[j] = (float *)calloc(l.classes, sizeof(float *));
+
+	flag_exit = 0;
+
+	pthread_t fetch_thread;
+	pthread_t detect_thread;
+
+	fetch_in_thread(0);
+	det_im = in_img;
+	det_s = in_s;
+
+	fetch_in_thread(0);
+	detect_in_thread(0);
+	det_img = in_img;
+	det_s = in_s;
+
+	for (j = 0; j < FRAMES / 2; ++j) {
+		fetch_in_thread(0);
+		detect_in_thread(0);
+		det_img = in_img;
+		det_s = in_s;
+	}
+
+	int count = 0;
+	if (!prefix && !dont_show) {
+		cvNamedWindow("Demo", CV_WINDOW_NORMAL);
+		cvMoveWindow("Demo", 0, 0);
+		cvResizeWindow("Demo", 1352, 1013);
+	}
+
+	CvVideoWriter* output_video_writer = NULL;    // cv::VideoWriter output_video;
+	if (out_filename && !flag_exit)
+	{
+		CvSize size;
+		size.width = det_img->width, size.height = det_img->height;
+		int src_fps = 25;
+		src_fps = get_stream_fps(cap, cpp_video_capture);
+
+		//const char* output_name = "test_dnn_out.avi";
+		//output_video_writer = cvCreateVideoWriter(out_filename, CV_FOURCC('H', '2', '6', '4'), src_fps, size, 1);
+		output_video_writer = cvCreateVideoWriter(out_filename, CV_FOURCC('D', 'I', 'V', 'X'), src_fps, size, 1);
+		//output_video_writer = cvCreateVideoWriter(out_filename, CV_FOURCC('M', 'J', 'P', 'G'), src_fps, size, 1);
+		//output_video_writer = cvCreateVideoWriter(out_filename, CV_FOURCC('M', 'P', '4', 'V'), src_fps, size, 1);
+		//output_video_writer = cvCreateVideoWriter(out_filename, CV_FOURCC('M', 'P', '4', '2'), src_fps, size, 1);
+		//output_video_writer = cvCreateVideoWriter(out_filename, CV_FOURCC('X', 'V', 'I', 'D'), src_fps, size, 1);
+		//output_video_writer = cvCreateVideoWriter(out_filename, CV_FOURCC('W', 'M', 'V', '2'), src_fps, size, 1);
+	}
+
+	double before = get_wall_time();
+
+	while (1) {
+		++count;
+		if (1) {
+			if (pthread_create(&fetch_thread, 0, fetch_in_thread, 0)) error("Thread creation failed");
+			if (pthread_create(&detect_thread, 0, detect_in_thread, 0)) error("Thread creation failed");
+
+			if (!prefix) {
+				if (!dont_show) {
+					show_image_cv_ipl(show_img, "Demo");
+					int c = cvWaitKey(1);
+					if (c == 10) {
+						if (frame_skip == 0) frame_skip = 60;
+						else if (frame_skip == 4) frame_skip = 0;
+						else if (frame_skip == 60) frame_skip = 4;
+						else frame_skip = 0;
+					}
+					else if (c == 27 || c == 1048603) // ESC - exit (OpenCV 2.x / 3.x)
+					{
+						flag_exit = 1;
+					}
+				}
+			}
+			else {
+				char buff[256];
+				sprintf(buff, "%s_%08d.jpg", prefix, count);
+				cvSaveImage(buff, show_img, 0);
+				//save_image(disp, buff);
+			}
+
+			// if you run it with param -http_port 8090  then open URL in your web-browser: http://localhost:8090
+			if (http_stream_port > 0 && show_img) {
+				//int port = 8090;
+				int port = http_stream_port;
+				int timeout = 200;
+				int jpeg_quality = 30;	// 1 - 100
+				send_mjpeg(show_img, port, timeout, jpeg_quality);
+			}
+
+			// save video file
+			if (output_video_writer && show_img) {
+				cvWriteFrame(output_video_writer, show_img);
+				printf("\n cvWriteFrame \n");
+			}
+
+			cvReleaseImage(&show_img);
+
+			pthread_join(fetch_thread, 0);
+			pthread_join(detect_thread, 0);
+
+			if (flag_exit == 1) break;
+
+			if (delay == 0) {
+				show_img = det_img;
+			}
+			det_img = in_img;
+			det_s = in_s;
+		}
+		else {
+			fetch_in_thread(0);
+			det_img = in_img;
+			det_s = in_s;
+			detect_in_thread(0);
+
+			show_img = det_img;
+			if (!dont_show) {
+				show_image_cv_ipl(show_img, "Demo");
+				cvWaitKey(1);
+			}
+			cvReleaseImage(&show_img);
+		}
+		--delay;
+		if (delay < 0) {
+			delay = frame_skip;
+
+			double after = get_wall_time();
+			float curr = 1. / (after - before);
+			fps = curr;
+			before = after;
+		}
+	}
+	printf("input video stream closed. \n");
+	if (output_video_writer) {
+		cvReleaseVideoWriter(&output_video_writer);
+		printf("output_video_writer closed. \n");
+	}
+
+	// free memory
+	cvReleaseImage(&show_img);
+	cvReleaseImage(&in_img);
+	free_image(in_s);
+
+	free(avg);
+	for (j = 0; j < FRAMES; ++j) free(predictions[j]);
+	for (j = 0; j < FRAMES; ++j) free_image(images[j]);
+
+	for (j = 0; j < l.w*l.h*l.n; ++j) free(probs[j]);
+	free(boxes);
+	free(probs);
+
+	free_ptrs(names, net.layers[net.n - 1].classes);
+
+	int i;
+	const int nsize = 8;
+	for (j = 0; j < nsize; ++j) {
+		for (i = 32; i < 127; ++i) {
+			free_image(alphabet[j][i]);
+		}
+		free(alphabet[j]);
+	}
+	free(alphabet);
+
+	free_network(net);
+}
+
+
 #else
 void demo(char *cfgfile, char *weightfile, float thresh, float hier_thresh, int cam_index, const char *filename, char **names, int classes,
 	int frame_skip, char *prefix, char *out_filename, int http_stream_port, int dont_show, int ext_output)
@@ -350,4 +572,107 @@ void demo(char *cfgfile, char *weightfile, float thresh, float hier_thresh, int 
     fprintf(stderr, "Demo needs OpenCV for webcam images.\n");
 }
 #endif
+/*
+// Convert to string
+#define SSTR( x ) static_cast< std::ostringstream & >( \
+( std::ostringstream() << std::dec << x ) ).str()
 
+int track(char **videoFile)
+{
+	string trackerTypes[6] = { "BOOSTING", "MIL", "KCF", "TLD","MEDIANFLOW", "GOTURN" };
+	// vector <string> trackerTypes(types, std::end(types));
+
+	// Create a tracker
+	string trackerType = trackerTypes[0];
+
+	Ptr<Tracker> tracker;
+
+#if (CV_MINOR_VERSION < 3)
+	{
+		tracker = Tracker::create(trackerType);
+	}
+#else
+	{
+		if (trackerType == "BOOSTING")
+			tracker = TrackerBoosting::create();
+		if (trackerType == "MIL")
+			tracker = TrackerMIL::create();
+		if (trackerType == "KCF")
+			tracker = TrackerKCF::create();
+		if (trackerType == "TLD")
+			tracker = TrackerTLD::create();
+		if (trackerType == "MEDIANFLOW")
+			tracker = TrackerMedianFlow::create();
+		if (trackerType == "GOTURN")
+			tracker = TrackerGOTURN::create();
+	}
+#endif
+	// Read video
+	VideoCapture video(videoFile);
+
+	// Exit if video is not opened
+	if (!video.isOpened())
+	{
+		cout << "Could not read video file" << endl;
+		return 1;
+
+	}
+
+	// Read first frame
+	Mat frame;
+	bool ok = video.read(frame);
+
+	// Define initial boundibg box
+	Rect2d bbox(287, 23, 86, 320);
+
+	// Uncomment the line below to select a different bounding box
+	bbox = selectROI(frame, false);
+
+	// Display bounding box.
+	rectangle(frame, bbox, Scalar(255, 0, 0), 2, 1);
+	imshow("Tracking", frame);
+
+	tracker->init(frame, bbox);
+
+	while (video.read(frame))
+	{
+		// Start timer
+		double timer = (double)getTickCount();
+
+		// Update the tracking result
+		bool ok = tracker->update(frame, bbox);
+
+		// Calculate Frames per second (FPS)
+		float fps = getTickFrequency() / ((double)getTickCount() - timer);
+
+		if (ok)
+		{
+			// Tracking success : Draw the tracked object
+			rectangle(frame, bbox, Scalar(255, 0, 0), 2, 1);
+		}
+		else
+		{
+			// Tracking failure detected.
+			putText(frame, "Tracking failure detected", Point(100, 80), FONT_HERSHEY_SIMPLEX, 0.75, Scalar(0, 0, 255), 2);
+		}
+
+		// Display tracker type on frame
+		putText(frame, trackerType + " Tracker", Point(100, 20), FONT_HERSHEY_SIMPLEX, 0.75, Scalar(50, 170, 50), 2);
+
+		// Display FPS on frame
+		putText(frame, "FPS : " + SSTR(int(fps)), Point(100, 50), FONT_HERSHEY_SIMPLEX, 0.75, Scalar(50, 170, 50), 2);
+
+		// Display frame.
+		imshow("Tracking", frame);
+
+		// Exit if ESC pressed.
+		int k = waitKey(1);
+		if (k == 27)
+		{
+			break;
+		}
+
+	}
+}
+
+*/

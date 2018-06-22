@@ -408,7 +408,7 @@ void trackDemo(char *cfgfile, char *weightfile, float thresh, float hier_thresh,
 	pthread_t detect_thread;
 
 	fetch_in_thread(0);
-	det_im = in_img;
+	det_img = in_img;
 	det_s = in_s;
 
 	fetch_in_thread(0);
